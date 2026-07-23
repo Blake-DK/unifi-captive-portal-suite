@@ -23,7 +23,7 @@ e2e-artifacts/
 # src/app/api/traefik/ (which is exactly how v2.0.0 shipped without its
 # config endpoint).
 /traefik/
-# Database dumps written by backup.sh — never commit (contain guest PII).
+# Database dumps written by install.sh backup — never commit (contain guest PII).
 backups/
 
 # User uploads

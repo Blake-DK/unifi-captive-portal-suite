@@ -602,7 +602,7 @@ providers:
               <option value="none">None — portal is reached directly (no HTTPS hostnames)</option>
             </select>
             <p className="text-xs text-muted-foreground">
-              Bundled needs <code>COMPOSE_PROFILES=traefik</code> in <code>.env</code> (setup.sh
+              Bundled needs <code>COMPOSE_PROFILES=traefik</code> in <code>.env</code> (install.sh setup
               offers this; add it and <code>docker compose up -d</code> to enable later).
             </p>
           </div>

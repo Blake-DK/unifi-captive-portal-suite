@@ -17,9 +17,9 @@ measure this list against commercial tools.
 | **Network visibility** | Live topology map with issue badges + flapping-link overlay, unified issues board (`/admin/issues`), device + site health (`/admin/status`), all-clients list with rogue-extender flagging + filters (`/admin/clients`), dedicated range-extender tool (`/admin/extenders`), click-through **draggable client-detail windows** (live state + registration + 30-day session history), AP stats tab (`/admin/aps`), switch-port inventory showing clients *and* UniFi devices per port (`/admin/ports`), metric history charts (`/admin/metrics`), correlated assurance timeline (`/admin/timeline`), DPI traffic reports (site + per guest) |
 | **Remediation** | Device restart / PoE power-cycle / locate, SSH suite (diagnostics allowlist, audited command box, interactive terminal), **per-port packet capture** (bounded audited tcpdump → `.pcap` download), **client block/unblock with required reason + who/when recorded**, guided troubleshoot runbooks (5) |
 | **Alerting** | Background monitor: offline/subsystem/CPU/memory/firmware, switch-port saturation + interface errors, suspected rogue extenders; batched email+webhook digests; diff-based writes |
-| **Security & governance** | Role-based admin accounts (admin/operator/monitor + traffic grant), TOTP 2FA + recovery codes, login rate limiting (admin + guest), full audit trail with CSV, secrets encrypted at rest (AES-256-GCM), admin-path firewalling via Pangolin Check/Apply |
+| **Security & governance** | Role-based admin accounts (admin/operator/monitor + traffic grant), TOTP 2FA + recovery codes, login rate limiting (admin + guest), full audit trail with CSV, secrets encrypted at rest (AES-256-GCM), admin-path firewalling via the bundled Traefik reverse proxy |
 | **Data protection** | Per-location retention/anonymization policies, SAR export, right-to-erasure, audit-log retention window, GDPR.md |
-| **Ops** | CI build/publish + semantic-release versioning, one-command setup/deploy scripts with registry pull token, health-checked deploys with image pruning, in-app version/build footer |
+| **Ops** | CI build/publish to GHCR, one-command `install.sh` (setup/update/verify/migrate/channel/backup/restore), health-checked deploys with image pruning, in-app version/build footer |
 
 ## Where we stand vs. commercial tools
 
@@ -32,8 +32,8 @@ threat management, PacketFence-class NAC). This section is reviewed as of
 
 **Competitive-to-ahead on the guest-portal side:**
 - Custom-branded, location-aware registration flow; dark mode; served over
-  HTTPS via a self-managed Pangolin reverse-proxy integration (one-click
-  Check/Apply of the proxy resources, admin-path firewalling).
+  HTTPS via the bundled Traefik reverse proxy (GUI-managed Proxied Resources,
+  Cloudflare DNS-01 certificates, admin-path firewalling).
 - Guest self-service: login, live device list, labels, add/remove, profile,
   magic-link handoff out of the captive webview.
 - Admin: sessions view, logs + CSV, users directory, act-on-behalf
@@ -394,7 +394,7 @@ are pure in `src/lib/dupIp.ts` with 15 unit tests on Node's built-in runner
 > **Traefik replaced Pangolin** (routes via the token-gated HTTP-provider
 > endpoint, Proxied Resources editor, Cloudflare DNS-01 certs, GUI-owned
 > config, `traefik-ops` restart sidecar) and **macvlan was retired** (bridge
-> networking + host ports; setup.sh lost its network preflight). The CI gate
+> networking + host ports; install.sh setup lost its network preflight). The CI gate
 > suite also landed (typecheck/gitleaks/migration-check/Trivy+Grype/npm cache,
 > standalone 620 MB image, Snyk-style PR security gate + branch protection),
 > plus the **develop-branch workflow** (direct pushes, patch-only builds,

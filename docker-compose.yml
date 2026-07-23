@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - portal-pgdata:/var/lib/postgresql/data
-      # backup.sh writes dumps here; point BACKUP_PATH at a second location.
+      # install.sh backup writes dumps here; point BACKUP_PATH at a second location.
       - ${BACKUP_PATH:-./backups}:/backups
     # db-net reaches the guest/all container; db-net-admin reaches the split
     # admin container. Two DB networks (not one shared) so the guest and admin
@@ -50,7 +50,7 @@ services:
       # (traefik.yml + cf-token — Settings -> URLs -> Reverse Proxy).
       - ./traefik:/app/traefik
     # Without the bundled Traefik (mode "external"/"none"), publish the portal
-    # directly instead — setup.sh enables this line (host 80 -> app 3000):
+    # directly instead — install.sh setup enables this line (host 80 -> app 3000):
     # ports:
     #   - "80:3000"
     depends_on:
@@ -102,7 +102,7 @@ services:
       - db-net-admin
 
   # Bundled reverse proxy — runs only with COMPOSE_PROFILES=traefik in .env
-  # (setup.sh offers it). All of its config is portal-managed: static config
+  # (install.sh setup offers it). All of its config is portal-managed: static config
   # from the shared ./traefik mount, routes live from the portal's
   # /api/traefik/config (HTTP provider), certs via Cloudflare DNS-01.
   traefik:

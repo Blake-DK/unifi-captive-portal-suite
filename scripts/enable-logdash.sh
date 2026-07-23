@@ -4,19 +4,19 @@
 # asks for the dashboard hostname, patches .env (COMPOSE_PROFILES +
 # LOGDASH_*), and brings the stack up. Sign-in needs no setup here: the
 # dashboard is gated by the portal's own admin sign-in (forwardAuth).
-# Safe to re-run: existing values are offered as defaults. update.sh offers
+# Safe to re-run: existing values are offered as defaults. install.sh update offers
 # to run this once per host; running it by hand later is the same thing.
 set -eu
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { echo "!! No .env here — run on a deployed host (setup.sh first)."; exit 1; }
+[ -f .env ] || { echo "!! No .env here — run on a deployed host (install.sh setup first)."; exit 1; }
 [ -t 0 ] || { echo "!! Needs an interactive terminal."; exit 1; }
 command -v openssl >/dev/null || { echo "!! openssl is required (token generation)."; exit 1; }
 
 env_get() { sed -n "s/^$1=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}\$/\1/p" .env | head -1; }
 
 # Replace or append KEY='value'. SINGLE quotes on purpose: values must stay
-# literal for both docker compose's dotenv parser and update.sh's own
+# literal for both docker compose's dotenv parser and install.sh update's own
 # `set -a; . ./.env` sourcing. sed replacement escapes & \ and the delimiter.
 env_set() {
   key="$1"; val="$2"

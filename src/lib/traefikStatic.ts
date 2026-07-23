@@ -10,7 +10,7 @@ import { decryptSecret, encryptSecret } from "./secrets";
  * Renders the bundled Traefik's *static* configuration into the shared
  * ./traefik mount (compose binds it rw here at /app/traefik and ro into the
  * traefik container at /etc/traefik). Everything changeable lives in the GUI
- * (Settings → URLs → Reverse Proxy); setup.sh only seeds the first boot
+ * (Settings → URLs → Reverse Proxy); install.sh setup only seeds the first boot
  * (mode "bundled" + the admin URL, via .env — see seedBundledFromEnv):
  *   - traefik.yml   entrypoints, ACME (Cloudflare DNS-01), HTTP provider
  *   - cf-token      the Cloudflare zone token (0600); lego reads it via the
@@ -77,7 +77,7 @@ providers:
 }
 
 /**
- * First-boot seed: setup.sh records the bundled-Traefik choice (and the
+ * First-boot seed: install.sh setup records the bundled-Traefik choice (and the
  * admin URL it asks for) in .env, but this module manages ./traefik only
  * when the DB says mode "bundled" — and on a fresh database nothing could
  * ever say so: Traefik had no config, the portal no published host port,

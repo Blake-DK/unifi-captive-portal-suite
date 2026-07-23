@@ -37,7 +37,7 @@ CREATE TABLE "SystemSettings" (
     "termsOfUse" TEXT NOT NULL DEFAULT 'By connecting to GUEST-NET you accept the terms of use and data handling policy.',
     "baseBuildings" TEXT NOT NULL DEFAULT '',
     "deployedBuildings" TEXT NOT NULL DEFAULT '',
-    "welcomeText" TEXT NOT NULL DEFAULT 'Welcome to example',
+    "welcomeText" TEXT NOT NULL DEFAULT 'Welcome to the guest network',
     "unifiUrl" TEXT NOT NULL DEFAULT '',
     "unifiUsername" TEXT NOT NULL DEFAULT '',
     "unifiPassword" TEXT NOT NULL DEFAULT '',

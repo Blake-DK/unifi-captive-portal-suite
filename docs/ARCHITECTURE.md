@@ -133,8 +133,8 @@ Status legend: **✅ implemented** · **➖ partial / by-design limitation** ·
   premature enforcement encourages coverage-theatre.
 
 ### Code review & standards, ✅
-- All changes via PR (GitHub), Conventional Commits driving semantic-release,
-  TypeScript strict, ESLint, project standing orders in CLAUDE.md.
+- All changes via PR (GitHub), Conventional Commits, TypeScript strict mode,
+  ESLint.
 
 ---
 

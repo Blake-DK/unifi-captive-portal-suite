@@ -74,7 +74,7 @@
 ### Bug Fixes
 
 * setup asks for the admin URL and seeds the bundled proxy on first boot ([#171](https://github.com/Blake-DK/unifi-captive-portal-suite/issues/171)) ([4b4b607](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/4b4b6071f28a849fce4f899f7530d7c0c9f22afb))
-* setup.sh detects and repairs a .env/DB password mismatch ([#170](https://github.com/Blake-DK/unifi-captive-portal-suite/issues/170)) ([592e815](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/592e815de19a2b4721a748d3cf1185af6eb5c396))
+* install.sh setup detects and repairs a .env/DB password mismatch ([#170](https://github.com/Blake-DK/unifi-captive-portal-suite/issues/170)) ([592e815](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/592e815de19a2b4721a748d3cf1185af6eb5c396))
 
 
 ### Features
@@ -110,7 +110,7 @@
 
 * the portal listens on 3000 in-container; direct-mode
 installs must republish as "80:3000" and chown ./traefik to 1000:1000
-(setup.sh handles both on re-run).
+(install.sh setup handles both on re-run).
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 
@@ -132,7 +132,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 * the Pangolin integration is gone (pangolinUrl/
 pangolinOrgId/pangolinApiKey are dropped by migration) and the compose
 stack no longer uses macvlan — existing installs must choose a reverse
-proxy via setup.sh (bundled Traefik profile or a direct port mapping),
+proxy via install.sh setup (bundled Traefik profile or a direct port mapping),
 re-point DNS and the UniFi hotspot custom_ip from the old container IP
 (10.90.0.232) to the Docker host, and configure certificates in
 Settings -> URLs -> Reverse Proxy.
@@ -213,14 +213,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 
 ### Features
 
-* update.sh — one-command host update (checkout + image, restart only on change) ([646140f](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/646140f35b1c73db1b84b883c49345a8674bd7b5))
+* install.sh update — one-command host update (checkout + image, restart only on change) ([646140f](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/646140f35b1c73db1b84b883c49345a8674bd7b5))
 
 ## [1.23.1](https://github.com/Blake-DK/unifi-captive-portal-suite/compare/v1.23.0...v1.23.1) (2026-07-07)
 
 
 ### Bug Fixes
 
-* setup.sh asks for the portal IP when the compose default is off-LAN ([ad07358](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/ad07358edff4b956ec0794cd81a722f6caa36ca5))
+* install.sh setup asks for the portal IP when the compose default is off-LAN ([ad07358](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/ad07358edff4b956ec0794cd81a722f6caa36ca5))
 
 # [1.23.0](https://github.com/Blake-DK/unifi-captive-portal-suite/compare/v1.22.0...v1.23.0) (2026-07-07)
 
@@ -382,7 +382,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 
 ### Bug Fixes
 
-* setup.sh macvlan preflight + resumable, clear errors on partial runs ([4814a6e](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/4814a6e2d38c74707e2ac9ca0303ffb36eab3904))
+* install.sh setup macvlan preflight + resumable, clear errors on partial runs ([4814a6e](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/4814a6e2d38c74707e2ac9ca0303ffb36eab3904))
 
 # [1.7.0](https://github.com/Blake-DK/unifi-captive-portal-suite/compare/v1.6.0...v1.7.0) (2026-07-06)
 
@@ -493,7 +493,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 ### Bug Fixes
 
 * move Traffic under the Network sidebar group ([cbd675c](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/cbd675cd116fa6d4e579f96592497e1549c79783))
-* restore executable bit on setup.sh ([d29d9db](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/d29d9dbfb507ccd90b51f387aabfaf1e1ddc19e8))
+* restore executable bit on install.sh setup ([d29d9db](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/d29d9dbfb507ccd90b51f387aabfaf1e1ddc19e8))
 * use public git.example.com hostname for the container registry ([06ef856](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/06ef85669ce451e721ae1bc1cc84c43a157cee96))
 
 
@@ -507,7 +507,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 * run semantic-release on push to main ([7aab192](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/7aab192d94aa7e9edc8e1ad3c03fddbccc4c22e6))
 * seed cookieSecure/guestSessionSecret from env once at boot ([3ed421f](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/3ed421f296f6dd0a6ecb1629eaafc42fc41ea0b3))
 * Session Security settings in the URLs tab ([25719c0](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/25719c0b5cba62ab9e245584224ad84f811cbeca))
-* setup.sh generates and prints the admin password + login URL ([35521fa](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/35521fa08737b9ef4fefe59640f597b3c935a962))
+* install.sh setup generates and prints the admin password + login URL ([35521fa](https://github.com/Blake-DK/unifi-captive-portal-suite/commit/35521fa08737b9ef4fefe59640f597b3c935a962))
 
 # Changelog
 
@@ -573,7 +573,7 @@ admin sidebar. See [Versioning & releases](README.md#versioning--releases).
   compose pull` works from any host running the compose file.
 
 ### Ops
-- **setup.sh** — first-time host bootstrap: creates `.env` (generating
+- **install.sh setup** — first-time host bootstrap: creates `.env` (generating
   `POSTGRES_PASSWORD`/`ADMIN_SECRET`), pulls images, brings up `db` + `portal`,
   waits for both healthchecks. README now documents it as a single-command
   quick setup, distinct from `install.sh update` (routine redeploy after CI publishes).

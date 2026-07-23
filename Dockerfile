@@ -9,7 +9,7 @@ COPY prisma ./prisma
 RUN --mount=type=cache,target=/root/.npm npm ci
 
 # ── Stage 1b: prisma CLI for the runtime image ────────────────────────────────
-# The boot migration (entrypoint.sh) and deploy.sh's `npx prisma migrate
+# The boot migration (entrypoint.sh) and install.sh update's `npx prisma migrate
 # status` need the Prisma CLI, which the standalone trace below does NOT
 # include — and the CLI has its own transitive deps (@prisma/config → effect,
 # engines…), so cherry-picking folders from the full tree is whack-a-mole.
@@ -69,7 +69,7 @@ COPY --chown=node:node --from=builder /app/.next/standalone ./
 COPY --chown=node:node --from=builder /app/.next/static ./.next/static
 COPY --chown=node:node --from=builder /app/public ./public
 
-# Prisma for boot migrations + deploy.sh verification: schema + migrations,
+# Prisma for boot migrations + install.sh update verification: schema + migrations,
 # the self-contained CLI closure (incl. node_modules/.bin/prisma, so
 # `npx prisma …` keeps working), and the generated client (the app loads it
 # at runtime; belt-and-braces alongside the standalone trace).
@@ -97,7 +97,7 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /app/traefik && chown node:node /app /app/traefik
 
 # Non-root (trivy DS-0002): everything the app writes is owned by `node`;
-# the ./traefik bind mount must be chowned 1000:1000 on the host (setup.sh
+# the ./traefik bind mount must be chowned 1000:1000 on the host (install.sh setup
 # does this; existing installs: `chown -R 1000:1000 ./traefik`).
 USER node
 
