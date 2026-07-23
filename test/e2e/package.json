@@ -1,0 +1,9 @@
+{
+  "name": "portal-e2e",
+  "private": true,
+  "//": "Pin exactly; keep in sync with the image tag in test/e2e/Dockerfile — the Playwright image pre-installs browsers for exactly this version.",
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1"
+  }
+}

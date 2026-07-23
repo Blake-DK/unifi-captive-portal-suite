@@ -1,0 +1,227 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: unifi-captive-portal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: portal
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - portal-pgdata:/var/lib/postgresql/data
+      # install.sh backup writes dumps here; point BACKUP_PATH at a second location.
+      - ${BACKUP_PATH:-./backups}:/backups
+    # db-net reaches the guest/all container; db-net-admin reaches the split
+    # admin container. Two DB networks (not one shared) so the guest and admin
+    # containers share NO network — neither can reach the other directly, only
+    # the DB reaches both. db-net-admin is unused (db-only) until a split.
+    networks:
+      - db-net
+      - db-net-admin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  portal:
+    # IMAGE_TAG from .env: blank/unset = "latest" (main releases); develop
+    # hosts set IMAGE_TAG="develop" to track the integration branch builds.
+    image: ghcr.io/blake-dk/unifi-captive-portal-suite:${IMAGE_TAG:-latest}
+    container_name: unifi-captive-portal
+    restart: unless-stopped
+    healthcheck:
+      # 127.0.0.1, not localhost: the standalone server binds IPv4-only
+      # (HOSTNAME=0.0.0.0) and alpine resolves localhost to ::1 first.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql://portal:${POSTGRES_PASSWORD}@db:5432/portal"
+      # Pin over env_file: a stray PORT in .env once overrode the image's
+      # 3000 and took the healthcheck (and every route) down.
+      PORT: 3000
+    volumes:
+      - portal-uploads:/app/public/uploads
+      # The portal writes the bundled Traefik's static config here
+      # (traefik.yml + cf-token — Settings -> URLs -> Reverse Proxy).
+      - ./traefik:/app/traefik
+    # Without the bundled Traefik (mode "external"/"none"), publish the portal
+    # directly instead — install.sh setup enables this line (host 80 -> app 3000):
+    # ports:
+    #   - "80:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - web
+      - db-net
+
+  # Guest/admin split (optional, Phase 17 A-lite): a second container off the
+  # SAME image serving only the admin side. Enable by adding "split" to
+  # COMPOSE_PROFILES in .env and setting PORTAL_MODE=guest there (the portal
+  # service above then serves only the guest side; this one pins its own mode
+  # over the env_file). Both run the boot migration — Prisma serialises that
+  # with an advisory lock, so concurrent starts are safe. It sits on admin-net,
+  # NOT web, so the guest container cannot reach it directly — only Traefik
+  # (on both networks) routes to it. See docs/OPERATIONS.md "Guest/admin split".
+  portal-admin:
+    image: ghcr.io/blake-dk/unifi-captive-portal-suite:${IMAGE_TAG:-latest}
+    container_name: unifi-captive-portal-admin
+    restart: unless-stopped
+    profiles: ["split"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql://portal:${POSTGRES_PASSWORD}@db:5432/portal"
+      PORT: 3000
+      PORTAL_MODE: admin
+      # Pin over env_file: the admin container owns the schedulers in a split;
+      # a SCHEDULERS=off left in the shared .env must not disable them here too.
+      SCHEDULERS: ""
+    volumes:
+      - portal-uploads:/app/public/uploads
+      # Admin-side settings saves write the bundled Traefik's static config;
+      # in a split this process owns that file (the guest one never writes it).
+      - ./traefik:/app/traefik
+    depends_on:
+      db:
+        condition: service_healthy
+    # admin-net (Traefik ↔ admin) + db-net-admin (admin ↔ DB); deliberately NOT
+    # db-net, so the guest container shares no network with this one.
+    networks:
+      - admin-net
+      - db-net-admin
+
+  # Bundled reverse proxy — runs only with COMPOSE_PROFILES=traefik in .env
+  # (install.sh setup offers it). All of its config is portal-managed: static config
+  # from the shared ./traefik mount, routes live from the portal's
+  # /api/traefik/config (HTTP provider), certs via Cloudflare DNS-01.
+  traefik:
+    image: traefik:v3.5
+    container_name: unifi-captive-portal-traefik
+    restart: unless-stopped
+    profiles: ["traefik"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # lego reads the Cloudflare token from the portal-written file.
+      CF_DNS_API_TOKEN_FILE: /etc/traefik/cf-token
+    volumes:
+      - ./traefik:/etc/traefik:ro
+      - traefik-acme:/acme
+      # Access log for the optional log dashboard (logdash profile) — only
+      # written when the portal's static config enables it; empty otherwise.
+      - traefik-logs:/var/log/traefik
+    depends_on:
+      portal:
+        condition: service_healthy
+    # admin-net too, so in a split Traefik can reach the portal-admin upstream;
+    # when the split profile is off, admin-net simply has no other members.
+    # logdash-net likewise: only populated when the logdash profile is on.
+    networks:
+      - web
+      - admin-net
+      - logdash-net
+
+  # The one socket-holding container: restarts traefik when the portal
+  # requests it (marker file) or its static config changes — the portal
+  # itself never gets the docker socket. See scripts/traefik-ops-watch.sh.
+  traefik-ops:
+    image: docker:27-cli
+    container_name: unifi-captive-portal-traefik-ops
+    restart: unless-stopped
+    profiles: ["traefik"]
+    environment:
+      # Truncate the shared access log past this size (Traefik never rotates
+      # its own logs; an unbounded file would eventually fill the host disk).
+      LOG_MAX_MB: ${LOGDASH_LOG_MAX_MB:-256}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./traefik:/watch
+      - ./scripts/traefik-ops-watch.sh:/watch.sh:ro
+      - traefik-logs:/traefik-logs
+    entrypoint: ["sh", "/watch.sh"]
+
+  # ---------------------------------------------------------------------
+  # Optional Traefik log dashboard (https://github.com/hhftechnology/
+  # traefik-log-dashboard): real-time access-log analytics (GeoIP, status
+  # codes, per-service metrics). Enable by adding "logdash" to
+  # COMPOSE_PROFILES and setting LOGDASH_TOKEN / LOGDASH_HOST /
+  # LOGDASH_BASIC_AUTH in .env — see .env.example and
+  # docs/OPERATIONS.md "Traefik log dashboard". Third-party images; pin
+  # LOGDASH_IMAGE_TAG in .env if you want more than :latest.
+  # Both sit on their own network: Traefik routes to the UI (basic-auth
+  # gated, HTTPS-only), and neither the guest nor admin container can
+  # reach them directly.
+  logdash-agent:
+    image: hhftechnology/traefik-log-dashboard-agent:${LOGDASH_IMAGE_TAG:-latest}
+    container_name: unifi-captive-portal-logdash-agent
+    restart: unless-stopped
+    profiles: ["logdash"]
+    environment:
+      TRAEFIK_LOG_DASHBOARD_ACCESS_PATH: /logs/access.log
+      TRAEFIK_LOG_DASHBOARD_LOG_FORMAT: json
+      TRAEFIK_LOG_DASHBOARD_AUTH_TOKEN: ${LOGDASH_TOKEN:-}
+    volumes:
+      - traefik-logs:/logs:ro
+      - logdash-positions:/data
+    networks:
+      - logdash-net
+
+  logdash:
+    image: hhftechnology/traefik-log-dashboard:${LOGDASH_IMAGE_TAG:-latest}
+    container_name: unifi-captive-portal-logdash
+    restart: unless-stopped
+    profiles: ["logdash"]
+    environment:
+      AGENT_API_URL: http://logdash-agent:5000
+      AGENT_API_TOKEN: ${LOGDASH_TOKEN:-}
+      NODE_ENV: production
+      PORT: 3000
+      # The UI ships with a demo-data page linked by default — pointless (and
+      # confusing) behind the portal sign-in, so it's off. Upstream docs use
+      # both spellings across versions; set both.
+      SHOW_DEMO_PAGE: "false"
+      NEXT_PUBLIC_SHOW_DEMO_PAGE: "false"
+    depends_on:
+      - logdash-agent
+    networks:
+      - logdash-net
+
+networks:
+  web:
+    driver: bridge
+  # Split deployments only: the admin container's network, shared with Traefik
+  # but NOT with the guest container, so a compromised guest can't reach the
+  # admin process over the network. Empty (created but unused) when the split
+  # profile is off.
+  admin-net:
+    driver: bridge
+  db-net:
+    driver: bridge
+    internal: true
+  # The admin container's DB network (split only); db-only when unsplit.
+  db-net-admin:
+    driver: bridge
+    internal: true
+  # Log-dashboard stack ↔ Traefik only (logdash profile); the guest and
+  # admin containers are deliberately not members.
+  logdash-net:
+    driver: bridge
+
+volumes:
+  portal-pgdata:
+  portal-uploads:
+  traefik-acme:
+  traefik-logs:
+  logdash-positions:
