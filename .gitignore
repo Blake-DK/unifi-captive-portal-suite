@@ -1,0 +1,36 @@
+# Dependencies & build output
+node_modules
+.next
+out
+tsconfig.tsbuildinfo
+*.log
+.DS_Store
+
+# Environment & secrets — never commit
+.env
+.env.local
+
+# Local dev databases
+prisma/*.db
+prisma/*.db-journal
+
+# Runtime data (app-written)
+data/
+# Playwright traces/reports copied out of the e2e runner on failure
+e2e-artifacts/
+# Portal-written Traefik config — contains the Cloudflare token (cf-token).
+# Anchored to the repo root: an unanchored "traefik/" also swallows
+# src/app/api/traefik/ (which is exactly how v2.0.0 shipped without its
+# config endpoint).
+/traefik/
+# Database dumps written by backup.sh — never commit (contain guest PII).
+backups/
+
+# User uploads
+public/uploads/*
+!public/uploads/.gitkeep
+
+# Machine-local tooling & working notes — never commit
+CLAUDE.local.md
+HANDOFF.md
+.claude/

@@ -1,0 +1,75 @@
+name: CI
+
+# The "test" required check (branch protection on develop + main): install,
+# typecheck, unit tests, and the fresh-DB migration check. A full
+# `next build` is deliberately NOT here — the image pipelines build it, and
+# duplicate Turbopack builds on the shared runner caused the historic
+# ssh2/ESM-chunk collision. Keep the step bodies in sync with
+# release-and-publish.yml where they overlap.
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+  push:
+    branches:
+      - develop
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # The job runs directly on the runner (no `container:`), so the
+      # service is only reachable via localhost:<mapped-port> — not by
+      # service name. Gitea's act_runner networking allowed hostname
+      # resolution here; real GitHub-hosted runners don't.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: portal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Migration check
+        # Hand-authored migrations: prove the chain applies from zero (the
+        # exact entrypoint boot command) and matches schema.prisma.
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/portal
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/localhost/5432) 2>/dev/null && break
+            [ "$i" = 30 ] && { echo "postgres service never came up" >&2; exit 1; }
+            sleep 2
+          done
+          npx prisma migrate deploy
+          npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code

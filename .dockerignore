@@ -1,0 +1,31 @@
+# Keep the build context hermetic. Without this, `COPY . .` in the Dockerfile
+# drags the host/runner's node_modules into the image, clobbering the clean
+# alpine deps stage — when CI runs `npm ci` before `docker build` (as the
+# release pipeline does), those are glibc-built native modules (next-swc,
+# prisma, ssh2, sharp…) and the musl/alpine build then fails. The image builds
+# its own deps in the `deps` stage, so none of this belongs in the context.
+node_modules
+.next
+.git
+.github
+
+# Never bake secrets or local state into the image
+.env
+.env.*
+backups
+*.log
+npm-debug.log*
+
+# Not needed at build/runtime
+.vscode
+.idea
+# The e2e suite tests the image; it doesn't belong inside it.
+test
+docker-compose.test.yml
+e2e-artifacts
+*.md
+# …except the changelog: the what's-new dialog serves it at runtime
+# (Dockerfile COPYs it out of the builder stage).
+!CHANGELOG.md
+coverage
+.DS_Store
