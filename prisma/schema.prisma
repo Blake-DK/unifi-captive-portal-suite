@@ -1,0 +1,648 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model GuestRegistration {
+  id            Int       @id @default(autoincrement())
+  firstName     String
+  lastName      String
+  email         String?
+  phone         String
+  cpf           String?
+  macAddress    String
+  apMac         String?
+  ssid          String?
+  site          String?
+  userAgent     String?
+  ipAddress     String?
+  locationType  String    @default("base") // legacy; new rows store the location name here for old CSV consumers
+  baseLocation  String?   // legacy, no longer written
+  building      String?
+  roomNumber    String?
+  locationId    Int?
+  location      Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  locationName  String?   // snapshot of Location.name at registration time — survives rename/delete
+  anonymizedAt  DateTime? // set by the retention job; null = untouched
+  emailVerifiedAt DateTime? // guest clicked the emailed confirmation link
+  expiryNotifiedAt DateTime? // expiry-warning email sent (once per registration)
+  authorizedAt  DateTime  @default(now())
+  durationMin   Int
+  consentTermsHash String? // sha256[:12] of the terms text accepted at registration
+  downKbps      Int?
+  upKbps        Int?
+  bytesTx       BigInt?
+  bytesRx       BigInt?
+  lastSeenAt    DateTime?
+  revokedAt     DateTime?
+  label         String?
+  voucherId     Int?
+  voucher       Voucher?  @relation(fields: [voucherId], references: [id], onDelete: SetNull)
+  eventId       Int?
+  event         Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([macAddress])
+  @@index([authorizedAt])
+  @@index([phone])
+  @@index([locationId])
+  @@index([eventId])
+}
+
+// Event mode: while an event is active (now within its window and not closed),
+// every new registration is auto-tagged with it, so a one-night event's guests
+// and devices are all traceable together afterwards. Optional plan overrides
+// let an event set its own duration/limits without touching the site defaults.
+model Event {
+  id            Int       @id @default(autoincrement())
+  name          String
+  startsAt      DateTime
+  endsAt        DateTime
+  closedAt      DateTime? // manual early close; also stops auto-tagging
+  note          String?
+  // Optional plan overrides (null = fall through to location/site default)
+  durationMin   Int?
+  downKbps      Int?
+  upKbps        Int?
+  quotaMB       Int?
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  registrations GuestRegistration[]
+
+  @@index([startsAt])
+}
+
+model Voucher {
+  id            Int       @id @default(autoincrement())
+  code          String    @unique // canonical form: uppercase A-Z/2-9, no separators
+  note          String? // batch label shown in the admin list
+  durationMin   Int // access window granted on redemption
+  downKbps      Int? // null = site default
+  upKbps        Int?
+  quotaMB       Int? // null = site default, 0 = unlimited
+  maxUses       Int       @default(1) // 0 = unlimited redemptions
+  usedCount     Int       @default(0)
+  expiresAt     DateTime? // redemption deadline; null = never
+  createdBy     String
+  createdAt     DateTime  @default(now())
+  revokedAt     DateTime?
+  registrations GuestRegistration[]
+
+  @@index([createdAt])
+}
+
+model Location {
+  id            Int      @id @default(autoincrement())
+  name          String
+  logoUrl       String?
+  buildings     String   @default("") // newline-delimited building list; empty = no building/room step
+  buildingFreeText Boolean @default(false) // guests type the building themselves (required); the list becomes suggestions
+  isHotel       Boolean  @default(false) // when true, room number is required at registration
+  sortOrder     Int      @default(0)
+  retentionMode String   @default("forever") // "forever" | "anonymize"
+  retentionDays Int      @default(0) // days past expiry/revocation before anonymizing (mode "anonymize")
+  // Tiered plan overrides — null = use the site-wide default
+  durationMin   Int?
+  downKbps      Int?
+  upKbps        Int?
+  quotaMB       Int?
+  maxDevices    Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  registrations GuestRegistration[]
+
+  @@index([sortOrder])
+}
+
+model WatchedClient {
+  mac       String   @id // lowercase canonical
+  note      String   @default("")
+  createdBy String
+  createdAt DateTime @default(now())
+  expiresAt DateTime? // null = watch until removed
+}
+
+model ConfigSnapshot {
+  id      Int      @id @default(autoincrement())
+  takenAt DateTime @default(now())
+  hash    String // sha256 of the canonical bundle
+  data    Json // Record<collection, rows[]> as fetched
+  summary Json? // ChangeSummary vs the previous snapshot (null on the baseline)
+
+  @@index([takenAt])
+}
+
+model SponsorRequest {
+  id             Int       @id @default(autoincrement())
+  createdAt      DateTime  @default(now())
+  tokenHash      String    @unique // sha256 of the one-use approval token
+  expiresAt      DateTime // approval-link lifetime (1h, Purple-style)
+  status         String    @default("pending") // pending | deciding | approved | denied | expired
+  decidedAt      DateTime?
+  sponsorEmail   String
+  grantedMin     Int? // sponsor's duration override; null = site default
+  payload        Json // the validated registration input, replayed on approval
+  firstName      String
+  lastName       String
+  phone          String
+  macAddress     String
+  registrationId Int? // the GuestRegistration created on approval
+
+  @@index([status, createdAt])
+}
+
+model AdminUser {
+  id             Int       @id @default(autoincrement())
+  username       String    @unique
+  passwordHash   String
+  // "admin" (full, incl. settings/accounts) | "operator" (guest + day-to-day
+  // device management) | "monitor" (read-only)
+  role           String    @default("monitor")
+  canViewTraffic Boolean   @default(false) // may see per-guest DPI/traffic data
+  totpSecret     String?
+  totpEnabled    Boolean   @default(false)
+  recoveryCodes  TotpRecoveryCode[]
+  createdAt      DateTime  @default(now())
+  lastLoginAt    DateTime?
+  // Optional auto-disable date for temporary admins: once passed, login and
+  // every existing session are rejected until another admin clears/moves it.
+  expiresAt      DateTime?
+  // Set on every password change: sessions issued before this instant are
+  // rejected, so a reset also revokes any stolen/parallel session.
+  sessionsValidFrom DateTime?
+  // Last app version whose changelog this admin dismissed — the what's-new
+  // dialog shows once per release per admin.
+  lastSeenVersion String?
+}
+
+// One-time backup codes for 2FA: if an admin loses their authenticator, a code
+// here logs them in instead of the TOTP. Stored hashed (like passwords) and
+// single-use (usedAt set on consumption). Regenerated as a set; cleared when
+// 2FA is disabled or reset.
+model TotpRecoveryCode {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// Device SSH credentials for the Network Map debugging tools. Multiple entries
+// are supported because a large network may push several different device
+// logins; the SSH client tries them in order (sortOrder) until one
+// authenticates. Passwords are stored like the other device/API secrets and
+// never returned to the browser.
+model DeviceSshCredential {
+  id        Int      @id @default(autoincrement())
+  label     String   @default("")
+  username  String
+  password  String
+  port      Int      @default(22)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([sortOrder])
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  chainHash String? // SHA-256(prev chainHash + canonical row); null on pre-feature rows
+  actorType String // "admin" | "guest" | "system"
+  actor     String // admin username (or "setup") / guest phone digits
+  action    String // dot-namespaced, e.g. "guest.revoke", "account.create"
+  target    String? // what was acted on: MAC, phone, username, route path
+  detail    Json? // small structured context (changed fields, labels, …)
+  ip        String?
+  outcome   String   @default("success") // "success" | "denied" | "failure"
+
+  @@index([createdAt])
+  @@index([actor])
+  @@index([action])
+}
+
+model SystemSettings {
+  id                String   @id @default("config")
+  brandName         String   @default("Guest WiFi Portal")
+  logoUrl           String?
+  backgroundUrl     String?
+  primaryColor      String   @default("#171717")
+  termsOfUse        String   @default("By connecting to this network you accept the terms of use and data handling policy.")
+  privacyNotice     String   @default("") // optional controller-authored privacy-notice body (Markdown); blank uses the built-in template
+  privacyContact    String   @default("") // contact for data-protection / rights requests, shown on the privacy page
+  baseBuildings     String   @default("")
+  deployedBuildings String   @default("")
+  welcomeText       String   @default("Welcome")
+  unifiUrl          String   @default("")
+  unifiUsername     String   @default("")
+  unifiPassword     String   @default("")
+  // Backup local accounts (lockout failover): tried in slot order ONLY while
+  // every earlier account is locked out / cooling down — never round-robined.
+  // Passwords encrypted like unifiPassword; a slot is active when both its
+  // username and password are set.
+  unifiUsername2    String   @default("")
+  unifiPassword2    String   @default("")
+  unifiUsername3    String   @default("")
+  unifiPassword3    String   @default("")
+  unifiUsername4    String   @default("")
+  unifiPassword4    String   @default("")
+  unifiSite         String   @default("default")
+  // Critical addresses (comma-separated IPs/CIDRs): devices/subnets that must
+  // never lose connectivity. The firewall apply REFUSES any plan whose blocks
+  // would cut one off, and warns when guests lose reach to one.
+  criticalAddresses String   @default("")
+  // Networks marked PCI-scoped (comma-separated controller network _ids, e.g.
+  // the Point-of-Sale VLAN) — the Network review segmentation check verifies
+  // the live firewall isolates them per PCI DSS expectations.
+  pciNetworkIds     String   @default("")
+  // Management networks (comma-separated IPs/CIDRs) allowed to reach the
+  // admin surface; empty = no source restriction. The settings API refuses
+  // to save a list that excludes the requester (lockout guard).
+  adminAllowedCidrs String   @default("")
+  unifiInsecureTls  Boolean  @default(true)
+  guestDurationMin  Int      @default(480)
+  guestDownKbps     Int      @default(0)
+  guestUpKbps       Int      @default(0)
+  portalSuccessUrl  String   @default("")
+  unifiApiType      String   @default("auto")
+  // Optional Integration-API key (X-API-KEY, UniFi OS 4+ / Network 9+). It
+  // SUPPLEMENTS the local account — the Integration API covers only a read
+  // subset (sites/clients/devices), so guest-auth, notes, throttle, sessions
+  // and events always use the account above. Secret — never returned to the
+  // browser.
+  unifiApiKey       String   @default("")
+  portalBaseUrl     String   @default("")
+  guestBaseUrl      String   @default("") // self-service host (e.g. https://wifi.example.com); blank = same host
+  maxDevicesPerPhone Int     @default(5)
+  guestQuotaMB      Int      @default(0)
+  defaultRetentionMode String @default("forever") // policy for rows with no location: "forever" | "anonymize"
+  defaultRetentionDays Int    @default(0)
+  auditRetentionDays   Int    @default(0) // 0 = keep AuditLog forever
+  lastRetentionRunAt   DateTime?
+  lastRetentionStats   Json?
+  // Email verification: guests get a short free window, then must confirm
+  // the emailed link to keep access.
+  emailVerifyEnabled    Boolean @default(false)
+  // Expiry notifications: email guests shortly before their access runs out
+  expiryNotifyEnabled   Boolean @default(false)
+  expiryNotifyLeadMin   Int     @default(60) // how long before expiry to notify
+  emailVerifyInitialMin Int     @default(60) // free window granted at registration
+  emailVerifyGraceMin   Int     @default(30) // window granted on "check your email" re-visits
+  smtpHost              String  @default("")
+  smtpPort              Int     @default(587)
+  smtpSecurity          String  @default("starttls") // "none" | "starttls" | "tls"
+  smtpUser              String  @default("")
+  smtpPassword          String  @default("") // secret — never returned to the browser
+  smtpFromEmail         String  @default("")
+  smtpFromName          String  @default("")
+  // Outbound mail provider: "smtp" (nodemailer, fields above) or "m365"
+  // (Microsoft Graph sendMail from a shared mailbox via an Entra app with
+  // application Mail.Send, scoped by ApplicationAccessPolicy — docs/M365-EMAIL.md).
+  emailProvider         String  @default("smtp")
+  m365TenantId          String  @default("")
+  m365ClientId          String  @default("")
+  m365ClientSecret      String  @default("") // secret — never returned to the browser
+  m365Sender            String  @default("") // shared-mailbox address (effective From)
+  emailVerifySubject    String  @default("Confirm your email address")
+  emailVerifyHeading    String  @default("Confirm your email")
+  emailVerifyBody       String  @default("Tap the button below to confirm your email address and unlock your full WiFi access. If you didn't request this, you can ignore this message.")
+  emailVerifyButton     String  @default("Confirm email address")
+  // URLs & reverse proxy (portal-managed Traefik)
+  adminBaseUrl          String  @default("") // admin host (e.g. https://portal-adm.example.com); blank = no separate admin URL
+  portalTargetIp        String  @default("") // where an EXTERNAL reverse proxy reaches the portal (host IP[:port]); bundled Traefik targets http://portal:80 over the compose bridge
+  // Nullable with NO default (not `@default(false)`): a migration backfill
+  // would silently overwrite the value for existing deployments before the
+  // one-time env-seed in seedSessionSecurityEnv.ts gets a chance to run.
+  // Null reads as "not yet configured" (false) at every read site.
+  cookieSecure          Boolean? // true only if served over HTTPS; wrong value on a plain-HTTP deployment breaks every login instantly (see Settings -> URLs confirm() guard, and the psql recovery note in GO-LIVE.md)
+  reverseProxyMode      String  @default("none") // "bundled" (compose traefik profile) | "external" (operator's own proxy) | "none"
+  acmeEmail             String  @default("") // Let's Encrypt account email for the bundled Traefik's cert resolver
+  cfDnsApiToken         String  @default("") // secret — Cloudflare zone token (Zone->DNS->Edit) for DNS-01; never returned to the browser
+  traefikConfigToken    String  @default("") // secret — bearer for GET /api/traefik/config; auto-generated on first enable
+  proxyRootDomains      String  @default("") // comma-separated root domains offered as the base-domain dropdown for proxied resources
+  // Device SSH — legacy single credential (superseded by DeviceSshCredential;
+  // migrated into that table and kept as a fallback / for older data).
+  deviceSshUsername     String  @default("")
+  deviceSshPassword     String  @default("") // secret — never returned to the browser
+  deviceSshPort         Int     @default(22)
+  // How often the admin live views (dashboard tiles, alerts list) re-fetch
+  // their data in the browser — not a page reload. Seconds; min enforced in the
+  // API.
+  liveRefreshSec        Int     @default(15)
+  // Network alerting: a background poller opens/resolves alerts on device and
+  // site health and notifies on transitions. Thresholds are global (one site).
+  alertsEnabled         Boolean @default(false)
+  alertPollSec          Int     @default(120) // controller poll interval
+  alertEmail            String  @default("") // recipient; blank = no email channel
+  alertWebhookUrl       String  @default("") // generic JSON POST; blank = no webhook
+  alertOfflineEnabled   Boolean @default(true) // device offline / unhealthy state
+  alertCpuPct           Int     @default(90) // 0 = disabled
+  alertMemPct           Int     @default(90) // 0 = disabled
+  alertFirmwareEnabled  Boolean @default(false) // firmware update available (noisy)
+  alertSubsystemEnabled Boolean @default(true) // site subsystem (wan/lan/wlan/www) not ok
+  alertSaturationPct    Int     @default(0) // switch-port link utilization %; 0 = disabled
+  alertPortErrPct       Int     @default(0) // switch-port error+discard ratio %; 0 = disabled
+  alertRogueExtenderEnabled Boolean @default(false) // suspected consumer WiFi extender/mesh node (heuristic OUI+hostname match; noisy/off by default)
+  alertFirstSeenEnabled Boolean @default(false) // alert when a never-before-seen MAC appears (NAC-lite; off by default)
+  alertFailedLoginCount Int     @default(5) // failed admin logins from one IP that open an alert; 0 = disabled
+  alertFailedLoginWindowMin Int @default(15) // minutes the failed-login burst window spans
+  alertControllerDownEnabled Boolean @default(true) // controller-outage watchdog (notify path needs no controller)
+  alertControllerDownCycles  Int     @default(3) // consecutive unreachable poll cycles before the alert opens
+  // SNMPv3 fallback poller: while the controller is down, reachability comes
+  // from polling the last-known infra devices directly instead of through it.
+  // v3 authPriv only by design — no community-string (v1/v2c) support.
+  snmpEnabled      Boolean @default(false)
+  snmpUser         String  @default("")
+  snmpAuthKey      String  @default("") // secret — never returned to the browser
+  snmpPrivKey      String  @default("") // secret — never returned to the browser
+  snmpAuthProtocol String  @default("sha") // sha | sha224 | sha256 | sha384 | sha512
+  snmpPrivProtocol String  @default("aes") // aes | aes256b | aes256r
+  snmpPort         Int     @default(161)
+  alarmWebhookSecret    String  @default("") // encrypted; non-empty enables POST /api/webhooks/unifi-alarm
+  // Sponsored guest access: a visitor's request is emailed to a sponsor who
+  // approves via an expiring one-use link (DoDI 8420.01-style host sponsorship).
+  sponsorRequired       Boolean @default(false)
+  sponsorEmails         String  @default("") // newline list for the sponsor dropdown
+  sponsorDomains        String  @default("") // newline list; free-text sponsor must match one (e.g. unit.mil)
+  sponsorDefaultMin     Int     @default(1440) // access granted on approval, unless the sponsor overrides
+  sponsorDurationOverride Boolean @default(true) // sponsor may set a duration on the approval page
+  // DoD/STIG-style click-through warning banner shown before the guest flow.
+  warningBannerEnabled  Boolean @default(false)
+  warningBannerText     String  @default("")
+  // Scheduled summary report (Meraki-style email digest).
+  reportEnabled         Boolean @default(false)
+  reportFrequency       String  @default("weekly") // "daily" | "weekly" | "monthly"
+  reportEmail           String  @default("") // blank = the alert email
+  reportLastSentAt      DateTime?
+  // Controller config history (Auvik-style change-driven versions).
+  configWatchEnabled    Boolean @default(false)
+  // Audit-trail syslog forwarding (SIEM export).
+  syslogEnabled         Boolean @default(false)
+  syslogHost            String  @default("")
+  syslogPort            Int     @default(514)
+  // Duplicate-IP false-positive suppression: poll the controller's alarms for
+  // duplicate-IP entries, run confidence checks (cheap → expensive), open a
+  // duplicate_ip alert only for genuine conflicts, and log everything gated
+  // into SuppressedAlert so nothing is silently dropped.
+  dupIpEnabled        Boolean @default(false)
+  dupIpDryRun         Boolean @default(true)  // classify + log only, never open alerts — safe first rollout while the alarm payload shape is verified
+  dupIpCheckMacRandom Boolean @default(true)  // (a) both MACs locally administered = randomised
+  dupIpCheckSessions  Boolean @default(true)  // (b) the two clients' sessions don't overlap
+  dupIpCheckDhcp      Boolean @default(true)  // (c) ≤1 currently-connected holder of the IP
+  dupIpCheckArping    Boolean @default(false) // (d) SSH arping probe — needs device SSH creds + the map below
+  dupIpArpingMap      String  @default("")    // one "vlan=device MAC" per line; "*" = any VLAN (usually the gateway)
+  // Update check: poll the GitHub releases API so /api/version and the admin
+  // sidebar can say whether this build is the latest release. Needs a
+  // read-only repo token if the GitHub repository is private.
+  updateCheckEnabled Boolean @default(false)
+  updateCheckToken   String  @default("") // secret — never returned to the browser
+  // Which release line the check follows: "stable" (v* releases from main)
+  // or "develop" (dev-v* tags — for hosts running the :develop image).
+  updateCheckChannel String  @default("stable")
+  // Metric history: a background sampler snapshots site + per-device metrics on
+  // a coarse interval into MetricSample and prunes old rows, powering trend charts.
+  metricsEnabled     Boolean @default(false)
+  metricSampleSec    Int     @default(300) // sampler interval; min 60
+  metricRetentionDays Int    @default(14)  // prune samples older than this
+  metricPerDevice    Boolean @default(true) // also sample per-device CPU/mem/clients
+  updatedAt         DateTime @updatedAt
+}
+
+// Extra hostnames served through the portal-managed Traefik (Settings ->
+// URLs): each becomes a router + service in the dynamic config Traefik polls
+// from /api/traefik/config. The portal's own three URLs are NOT rows here —
+// they come straight from SystemSettings.
+model ProxyResource {
+  id              Int      @id @default(autoincrement())
+  name            String // display label, also seeds the router/service key (slugged)
+  hostname        String // FQDN to route (must resolve to the Traefik host)
+  targetUrl       String // backend URL as Traefik reaches it, e.g. http://10.90.0.50:8123
+  tls             Boolean  @default(true) // terminate HTTPS with the cloudflare cert resolver
+  blockAdminPaths Boolean  @default(false) // 403 /admin + /api/admin like the guest hosts (for portal-pointing extras)
+  enabled         Boolean  @default(true)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([sortOrder])
+}
+
+// Every client MAC ever seen on the network (populated by the alert poller,
+// regardless of the first-seen toggle), so a never-before-seen device can be
+// flagged without the fleet re-flagging when the alert is enabled.
+model SeenDevice {
+  mac         String   @id
+  hostname    String?
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+}
+
+// Infra devices (AP/switch/gateway) cached from the last healthy alert cycle,
+// so a controller outage still has a MAC/IP/name list to SNMP-poll directly.
+// ~one row per adopted device; upserted only on change (see alertMonitor.ts).
+model SnmpTarget {
+  mac       String   @id
+  ip        String
+  name      String
+  model     String?
+  type      String? // uap | usw | udm | ugw | ...
+  updatedAt DateTime @updatedAt
+}
+
+// One open alert per (target, type); resolvedAt set when the condition clears.
+// The poller writes only on transitions, so steady state is near-zero I/O even
+// on a large fleet. `target` is a device MAC or a synthetic key (e.g.
+// "subsystem:wan").
+model Alert {
+  id               Int       @id @default(autoincrement())
+  target           String
+  targetName       String
+  type             String // offline | cpu | mem | firmware | subsystem
+  severity         String // error | warning
+  message          String
+  value            String? // the observed value at trigger (e.g. "95%")
+  firstSeenAt      DateTime  @default(now())
+  lastSeenAt       DateTime  @default(now())
+  resolvedAt       DateTime?
+  notifiedFiring   Boolean   @default(false)
+  notifiedResolved Boolean   @default(false)
+
+  @@index([resolvedAt])
+  @@index([target, type])
+  @@index([firstSeenAt])
+}
+
+// A duplicate-IP alarm the suppression gate classified as a false positive
+// (or, in dry-run, any classified alarm). One row per (ip, mac pair); repeats
+// bump lastSeenAt/count. Kept as its own auditable log — never silently drop —
+// with a read-only view on /admin/alerts.
+model SuppressedAlert {
+  id          Int       @id @default(autoincrement())
+  type        String    @default("duplicate_ip")
+  ip          String
+  macA        String    @default("") // lower of the two MACs, when known
+  macB        String    @default("")
+  vlan        Int?
+  reasons     String[]  @default([]) // which checks decided, e.g. "both MACs randomised"
+  verdict     String    @default("suppress") // suppress | genuine (dry-run) | inconclusive
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  lastAlarmAt DateTime? // newest controller alarm timestamp seen for this pair
+  count       Int       @default(1) // distinct alarm occurrences, not poll cycles
+
+  @@unique([ip, macA, macB])
+  @@index([lastSeenAt])
+}
+
+// A client blocked from the network via UniFi's cmd/stamgr block-sta. UniFi
+// itself doesn't track who blocked a station or why, so that accountability
+// lives here; the row disappears on unblock (full history is in AuditLog).
+model BlockedDevice {
+  mac       String   @id
+  reason    String
+  blockedBy String
+  blockedAt DateTime @default(now())
+}
+
+// Clients rate-limited via a UniFi user group — a gentler alternative to a
+// hard block. Local state mirrors the controller assignment + who/when/rate.
+model ThrottledDevice {
+  mac         String   @id
+  downKbps    Int
+  upKbps      Int
+  throttledBy String
+  throttledAt DateTime @default(now())
+}
+
+// Time-series metric samples for trend charts and assurance history. One row
+// per site snapshot (scope="site", deviceMac null) plus one row per online
+// device per cycle (scope="device") when per-device sampling is on. Written by
+// the background sampler on a coarse interval and pruned by retention days, so
+// volume stays bounded even on a large fleet. All metric columns are nullable
+// since site rows and device rows populate different subsets.
+model MetricSample {
+  id          Int      @id @default(autoincrement())
+  at          DateTime @default(now())
+  scope       String // "site" | "device" | "wan"
+  deviceMac   String? // null for site scope
+  name        String? // denormalized device name for charts
+  wanKey      String? // "wan1"/"wan2" on scope=wan rows; on site rows = the active WAN
+  clients     Int? // site: total associated stations; device: num_sta
+  cpuPct      Float? // device
+  memPct      Float? // device
+  txRate      Float? // bytes/sec — site: WAN egress
+  rxRate      Float? // bytes/sec — site: WAN ingress
+  wanLatency  Int? // ms — site/wan
+  xputUp      Float? // Mbps last speedtest — site/wan
+  xputDown    Float? // Mbps — site/wan
+  devicesUp   Int? // site
+  devicesDown Int? // site
+  guests      Int? // site
+  band        String? // radio rows: "2.4G" | "5G" | "6G"
+  airtimePct  Int? // radio rows: cu_total channel utilization %
+
+  @@index([scope, at])
+  @@index([deviceMac, at])
+  @@index([at])
+}
+
+// Operator classification of NOT-ADOPTED UniFi hardware seen as a client
+// (someone else's AP/switch/router on the wire, or gear awaiting onboarding).
+// Detected rows need no entry; rows exist for manual marks and ignores.
+model RogueUnifiDevice {
+  id        Int      @id @default(autoincrement())
+  mac       String   @unique // canonical lowercase
+  note      String   @default("")
+  // "marked" = operator says this client IS un-onboarded UniFi hardware;
+  // "ignored" = known foreign device, hide permanently;
+  // "ignored-until-reconnect" = hide while offline; auto-clears when it
+  // associates again.
+  status    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// An ADOPTED device the operator has chosen to ignore while it is offline
+// (decommissioned AP still in the controller, gear boxed for a rebuild). The
+// ignore is site-wide: the map, the status counts, the issues list and the
+// offline alert all skip it. It auto-clears the moment the device reports
+// online again, so a returning device is never silently unmonitored.
+model IgnoredDevice {
+  id        Int      @id @default(autoincrement())
+  mac       String   @unique // canonical lowercase
+  name      String   @default("") // snapshot of the device name, for the list
+  note      String   @default("")
+  createdBy String
+  createdAt DateTime @default(now())
+}
+
+// One row per outbound email attempt (all providers) — the "what did the
+// portal send" view on Settings → Email. No message bodies stored; purged by
+// the retention job on the auditRetentionDays knob.
+model EmailLog {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  kind      String // "verify" | "expiry" | "alert" | "test"
+  to        String
+  subject   String
+  provider  String // "smtp" | "m365"
+  ok        Boolean
+  error     String?
+
+  @@index([createdAt])
+}
+
+// A remote box that runs the k6 registration-burst load generator. The portal
+// generates a dedicated ed25519 keypair per host; the operator adds the public
+// key to that box's authorized_keys so the portal can SSH in passwordlessly and
+// launch the containerised harness. Everything here is admin+settings-gated and
+// audited; the private key (and optional sudo password) are encrypted at rest.
+model LoadTestHost {
+  id           Int      @id @default(autoincrement())
+  label        String   @default("")
+  host         String // IP or hostname of the generator box
+  port         Int      @default(22)
+  username     String
+  publicKey    String   @default("") // OpenSSH authorized_keys line (shown to the operator)
+  privateKey   String   @default("") // secret — encrypted; the ssh2 private key
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// One load-test run (may fan out across several hosts as shards). Status and
+// per-host container state are read live off the boxes; this row records the
+// parameters, the aggregate summary once finished, and gives a run history.
+model LoadTestRun {
+  id         Int       @id @default(autoincrement())
+  createdAt  DateTime  @default(now())
+  status     String    @default("running") // running | done | error
+  mode       String    @default("event") // event | burst
+  guests     Int       @default(0)
+  windowSec  Int       @default(0)
+  target     String    @default("")
+  hostIds    Json // [LoadTestHost.id, …] the run fanned out to
+  finishedAt DateTime?
+  summary    Json? // parsed k6 metrics, aggregated across hosts
+  note       String    @default("")
+
+  @@index([createdAt])
+}
+
+// Operator note attached to a WAN port-forward on the UPnP Inspector page.
+// UniFi has no place to annotate a forward ("why is this open?"), so the note
+// lives here keyed by a stable descriptor (proto/dstPort/fwdIp/fwdPort) that
+// survives the controller re-issuing a forward's _id.
+model PortForwardNote {
+  key       String   @id
+  note      String   @default("")
+  updatedBy String
+  updatedAt DateTime @default(now())
+}

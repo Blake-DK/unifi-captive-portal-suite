@@ -1,0 +1,65 @@
+name: Develop build
+
+# Integration line: every push to `develop` builds the Dockerfile and pushes
+# ghcr.io/blake-dk/unifi-captive-portal-suite:develop (+ a :sha tag). Same
+# build as the main/:latest workflow, just a different branch and tag. Tests
+# run separately in ci.yml.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: develop-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # ghcr push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        run: |
+          sha="$(git rev-parse HEAD)"
+          build_time="$(git log -1 --format=%cI "$sha")"
+          repo="ghcr.io/blake-dk/unifi-captive-portal-suite"
+          for attempt in 1 2 3; do
+            echo "==> Build+push attempt $attempt/3 (sha $sha)"
+            if docker buildx build \
+                --build-arg GIT_SHA="$sha" \
+                --build-arg BUILD_TIME="$build_time" \
+                --build-arg CHANNEL=develop \
+                --tag "$repo:develop" \
+                --tag "$repo:$sha" \
+                --push .; then
+              break
+            fi
+            echo "==> Attempt $attempt failed"
+            [ "$attempt" = 3 ] && { echo "all attempts failed" >&2; exit 1; }
+            sleep 30
+          done
+
+      - name: Runner disk cleanup
+        if: always()
+        run: |
+          docker images --format '{{.Repository}}:{{.Tag}}' \
+            | grep "^ghcr.io/blake-dk/unifi-captive-portal-suite:" \
+            | xargs -r docker rmi || true
+          docker image prune -f
+          docker builder prune -f --keep-storage 20GB
