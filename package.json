@@ -56,7 +56,7 @@
     "@semantic-release/release-notes-generator": "^14.1.1",
     "@tailwindcss/postcss": "^4.3.2",
     "@types/net-snmp": "^3.23.0",
-    "@types/node": "^26.0.1",
+    "@types/node": "^26.1.1",
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.15.5",
     "@types/qrcode": "^1.5.6",
