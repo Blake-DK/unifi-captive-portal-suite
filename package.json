@@ -54,7 +54,7 @@
     "@semantic-release/github": "^11.0.0",
     "@semantic-release/npm": "^13.1.5",
     "@semantic-release/release-notes-generator": "^14.1.1",
-    "@tailwindcss/postcss": "^4.3.2",
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/net-snmp": "^3.23.0",
     "@types/node": "^26.0.1",
     "@types/nodemailer": "^8.0.1",
