@@ -1,0 +1,301 @@
+name: Release and publish image
+
+# One pipeline per push to main: cut the release (if the commits warrant one),
+# THEN build and push the image from the resulting HEAD. Because the build runs
+# after semantic-release has bumped package.json, the version baked into the
+# image (src/lib/version.ts reads package.json) always matches the released
+# version — fixing the old "deploy shows the previous version" lag.
+#
+# This replaces the former split of docker-publish.yml (built every merge, from
+# the pre-bump commit) + semantic-release.yml (tried to rebuild the bumped
+# commit in a second, concurrent job). Those two builds ran at the same time on
+# the runner and collided (ssh2/ESM-chunk Turbopack error under contention), so
+# the release rebuild usually failed and :latest kept the pre-bump version.
+# A single build per push has no build to collide with.
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  # Serialise pushes so two pipelines never build on the runner at once.
+  group: release-and-publish
+  cancel-in-progress: false
+
+jobs:
+  release-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # semantic-release pushes the release commit + tag
+      packages: write # ghcr push
+    services:
+      # Fresh throwaway Postgres for the migration check below. Same major
+      # version as production (docker-compose.yml). The job runs directly on
+      # the runner (no `container:`), so it's only reachable via
+      # localhost:<mapped-port>, not by service name.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: portal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # RELEASE_TOKEN (an admin PAT), not the default GITHUB_TOKEN:
+          # @semantic-release/git pushes the version-bump commit straight to
+          # main, and main's branch protection rejects that push from the
+          # github-actions[bot] identity outright ("N of N required status
+          # checks are expected" — a bot push has none against a brand-new
+          # commit). enforce_admins:false exempts actual admin accounts, not
+          # GITHUB_TOKEN, so the push needs to run as one.
+          token: ${{ secrets.RELEASE_TOKEN }}
+          # Check out the current tip of main, NOT the specific commit that
+          # triggered this run. Under rapid back-to-back merges the concurrency
+          # group coalesces runs (intermediate ones get cancelled); building the
+          # branch tip means the surviving run always releases + ships the
+          # latest main, instead of an already-superseded intermediate commit.
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          # npm cache keyed on package-lock.json.
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dependency audit
+        # Fail the pipeline (before cutting a release) on a critical advisory in
+        # a *production* dependency, so a known-critical transitive dep can't
+        # ship unnoticed. Scoped to prod deps (--omit=dev) — dev-only tooling
+        # advisories don't reach the image. Relax to a warning by appending
+        # `|| true` if an unfixable prod advisory ever blocks shipping.
+        run: npm audit --omit=dev --audit-level=critical
+
+      - name: Typecheck
+        # tsc over the whole tree — also covers *.test.ts and other files
+        # `next build` never type-checks — so a type error blocks the release
+        # instead of surfacing as a broken build (or not at all).
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        # Pure-logic unit tests on Node's built-in runner (no framework). Runs
+        # before the release is cut, so a regression in the tested libs
+        # (dup-IP classification, CSV escaping) blocks the version bump + image
+        # build rather than shipping.
+        run: npm test
+
+      - name: Secret scan
+        # Full-history gitleaks (checkout above uses fetch-depth: 0): any
+        # committed credential blocks the release. Pinned binary download —
+        # the workspace lives inside the job container, so a `docker run -v`
+        # through the shared host daemon would mount a host path, not this
+        # checkout.
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks git --no-banner --redact .
+
+      - name: Migration check
+        # Migrations here are hand-authored (no `prisma migrate dev` on the
+        # deploy host), so prove two things against the fresh service DB:
+        # `migrate deploy` — the exact command the container entrypoint runs
+        # on boot — applies the whole chain cleanly from zero, and
+        # `migrate diff` shows the applied result matches schema.prisma
+        # (exits 2 on drift).
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/portal
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/localhost/5432) 2>/dev/null && break
+            [ "$i" = 30 ] && { echo "postgres service never came up" >&2; exit 1; }
+            sleep 2
+          done
+          npx prisma migrate deploy
+          npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+
+      - name: E2E throwaway build
+        # A candidate image from the pre-bump source — good enough for flow
+        # testing; the real image is rebuilt after the release below. No
+        # update-check token: this image never leaves the runner. Same
+        # 3-attempt retry as "Build image" (transient Turbopack failures) —
+        # keep the two loops in sync.
+        run: |
+          for attempt in 1 2 3; do
+            echo "==> E2E build attempt $attempt/3"
+            docker build -t portal-e2e-candidate . && exit 0
+            [ "$attempt" -lt 3 ] && sleep 30
+          done
+          exit 1
+
+      - name: E2E smoke suite
+        # The real container + a mock UniFi controller via compose on the
+        # host daemon, Playwright in the official browsers image joined to
+        # the compose network. No bind mounts anywhere (DOOD: job-container
+        # paths are not host paths). A red suite stops the job HERE — before
+        # semantic-release — so no version, changelog, or image ships.
+        env:
+          E2E_IMAGE: portal-e2e-candidate
+        run: bash test/e2e/run.sh
+
+      - name: E2E cleanup
+        # run.sh tears down via its EXIT trap; this covers a killed job, and
+        # drops the throwaway tags (the BuildKit layer cache survives rmi,
+        # so the post-release rebuild stays warm).
+        if: always()
+        run: |
+          docker compose -p portal-e2e -f docker-compose.test.yml down -v --remove-orphans || true
+          docker rm -f portal-e2e-run || true
+          docker rmi -f portal-e2e-candidate portal-e2e-runner || true
+
+      - name: Release
+        env:
+          # RELEASE_TOKEN, not the default GITHUB_TOKEN: @semantic-release/github's
+          # success hook comments on issues/PRs referenced by the release, which
+          # needs issues:write/pull-requests:write — permissions the job's
+          # contents/packages-scoped GITHUB_TOKEN doesn't have ("Resource not
+          # accessible by integration"). The release itself (tag, commit, GitHub
+          # Release object) had already succeeded when this first bit; only the
+          # notification comment failed, but that failure still stops the job
+          # before the image gets built and pushed. Same PAT as Checkout's token,
+          # for the same admin-bypass reason.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GIT_AUTHOR_NAME: semantic-release-bot
+          GIT_AUTHOR_EMAIL: semantic-release-bot@users.noreply.github.com
+          GIT_COMMITTER_NAME: semantic-release-bot
+          GIT_COMMITTER_EMAIL: semantic-release-bot@users.noreply.github.com
+        # On a release, @semantic-release/git commits the bumped package.json +
+        # CHANGELOG and advances local HEAD to that commit; on a no-op push it
+        # leaves HEAD untouched. Either way the build below builds the current
+        # HEAD, so the baked version is correct in both cases.
+        run: npx semantic-release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        # Built under a candidate tag, loaded into the local daemon (--load)
+        # for the vulnerability scan below; :latest and :<sha> are only
+        # pushed after that scan passes, so a gated image never reaches the
+        # registry (which the deploy host's 04:30 update cron pulls
+        # blindly). buildx, not classic `docker build`: the final push step
+        # needs BuildKit's own registry pusher (see its comment) — using
+        # buildx here too means that step hits 100% local cache instead of
+        # a real second build.
+        # Retried: the Turbopack build has shown transient ssh2/ESM-chunk
+        # failures; a clean retry of the identical source has always succeeded.
+        # Short sleeps suffice now that there's no concurrent build to outlast.
+        env:
+          # Read-only repo token, baked encrypted into the image (BuildKit
+          # secret — see the Dockerfile). Absent secret = feature skipped.
+          UPDATE_CHECK_TOKEN: ${{ secrets.UPDATE_CHECK_TOKEN }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          build_time="$(git log -1 --format=%cI "$sha")"
+          for attempt in 1 2 3; do
+            echo "==> Build attempt $attempt/3 (sha $sha)"
+            if docker buildx build \
+                --build-arg GIT_SHA="$sha" \
+                --build-arg BUILD_TIME="$build_time" \
+                --secret id=update_check_token,env=UPDATE_CHECK_TOKEN \
+                --tag "portal-candidate:$sha" \
+                --load .; then
+              exit 0
+            fi
+            echo "==> Attempt $attempt failed"
+            [ "$attempt" -lt 3 ] && sleep 30
+          done
+          echo "==> All 3 build attempts failed" >&2
+          exit 1
+
+      - name: Image vulnerability scan
+        # Versions kept in sync with security-scan.yml (the PR-time
+        # lockfile gate). Two independent scanners — Trivy and Grype use different
+        # vulnerability DBs and each catches advisories the other misses.
+        # Same gate philosophy as the npm audit above: only CRITICAL *and*
+        # fixable blocks the release (an unfixable advisory can't wedge
+        # shipping); everything else prints for visibility but doesn't gate.
+        # Named cache volumes keep both DBs between runs. On failure the
+        # candidate tag stays on the runner's daemon for inspection.
+        run: |
+          sha="$(git rev-parse HEAD)"
+          trivy() {
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v trivy-cache:/root/.cache/ \
+              aquasec/trivy:0.72.0 "$@"
+          }
+          grype() {
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -e GRYPE_DB_CACHE_DIR=/cache -v grype-cache:/cache \
+              anchore/grype:v0.115.0 "$@"
+          }
+          echo "==> Trivy: HIGH + CRITICAL report (informational)"
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --quiet "portal-candidate:$sha" || true
+          echo "==> Trivy: CRITICAL gate (fixable only)"
+          trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet "portal-candidate:$sha"
+          echo "==> Grype: full report (informational)"
+          grype "docker:portal-candidate:$sha" -q || true
+          echo "==> Grype: CRITICAL gate (fixable only)"
+          grype "docker:portal-candidate:$sha" --only-fixed --fail-on critical -q
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        # `docker buildx build --push` (BuildKit's own registry pusher), not
+        # classic `docker tag` + `docker push`: the classic push path hit a
+        # reproducible GHCR "unknown blob" error on this repo's first
+        # pushes — a cross-repo blob-mount bug for a shared base-image layer
+        # against a brand-new package. Rebuilding with the same build-args
+        # as "Build image" hits BuildKit's local cache from that step, so
+        # this is a re-export, not a real second build.
+        env:
+          UPDATE_CHECK_TOKEN: ${{ secrets.UPDATE_CHECK_TOKEN }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          build_time="$(git log -1 --format=%cI "$sha")"
+          docker buildx build \
+            --build-arg GIT_SHA="$sha" \
+            --build-arg BUILD_TIME="$build_time" \
+            --secret id=update_check_token,env=UPDATE_CHECK_TOKEN \
+            --tag "ghcr.io/blake-dk/unifi-captiveportal:latest" \
+            --tag "ghcr.io/blake-dk/unifi-captiveportal:$sha" \
+            --push .
+          docker rmi "portal-candidate:$sha" || true
+
+      - name: Runner disk cleanup
+        # The runners share this host's Docker daemon, and every build leaves
+        # debris behind: the pushed tags stay local (the registry already has
+        # them), superseded images go dangling, and the BuildKit cache grows
+        # without bound (it reached 74GB once). Local repo tags are safe to
+        # drop — rmi refuses while a running container uses one, and the
+        # BuildKit layer cache survives rmi, so the next build stays warm.
+        # The cache is capped rather than emptied for the same reason. Only
+        # ghcr.io/* tags are touched, so a failed scan still leaves
+        # portal-candidate:<sha> on the daemon for inspection. Keep this
+        # step body identical across the three build workflows.
+        if: always()
+        run: |
+          docker images --format '{{.Repository}}:{{.Tag}}' \
+            | grep "^ghcr.io/blake-dk/unifi-captiveportal:" \
+            | xargs -r docker rmi || true
+          docker image prune -f
+          docker builder prune -f --keep-storage 20GB

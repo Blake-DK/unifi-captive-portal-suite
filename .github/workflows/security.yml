@@ -1,0 +1,99 @@
+name: Security
+
+# Per-scanner required checks (branch protection): trivy-scan + gitleaks +
+# semgrep gate every PR to develop AND main. Snyk runs as a native GitHub
+# App integration (its own check, configured outside this workflow), not a
+# job here — merges gate on required status checks only, no bot-approval
+# review step.
+#
+# Scanner binaries are downloaded pinned, never run as docker-mounted
+# images: the job workspace lives inside the job container, and a
+# `docker run -v` through the shared DOOD daemon would mount host paths.
+# Keep versions in sync with the image scans in release-and-publish.yml /
+# develop-build.yml.
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+  schedule:
+    - cron: "0 6 * * 1"
+  # Manual trigger for the weekly sweep (image scans).
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: "0.72.0"
+  GITLEAKS_VERSION: "8.21.2"
+  SEMGREP_VERSION: "1.168.0"
+
+jobs:
+  trivy-scan:
+    runs-on: ubuntu-latest
+    env:
+      TRIVY_CACHE_DIR: .cache/trivy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Compute weekly cache key
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Vulnerability DB cache
+        uses: actions/cache@v6
+        with:
+          path: .cache/trivy
+          key: trivy-db-${{ steps.week.outputs.week }}
+      - name: Install Trivy
+        run: curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" | tar -xz trivy
+      - name: Filesystem scan (gate — HIGH + CRITICAL fail)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -o pipefail
+          if ! ./trivy fs --scanners vuln,misconfig --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 . 2>&1 | tee scan-report.txt; then
+            if [ -n "$PR_NUMBER" ]; then
+              body="🚨 **Trivy: HIGH/CRITICAL findings — this check blocks merging.**
+
+          \`\`\`
+          $(tail -n 60 scan-report.txt)
+          \`\`\`"
+              payload="$(python3 -c 'import json,sys; print(json.dumps({"body": sys.stdin.read()}))' <<<"$body")"
+              curl -sS -o /dev/null -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" \
+                -d "$payload" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" || true
+            fi
+            exit 1
+          fi
+      - name: Weekly image scan
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          docker build -t portal-weekly-scan:latest .
+          ./trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --docker-host unix:///var/run/docker.sock portal-weekly-scan:latest || {
+            echo "weekly image scan found HIGH/CRITICAL findings" >&2; exit 1; }
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Secret scan — any finding fails
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks git --no-banner --redact .
+
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: SAST — ERROR severity fails
+        run: |
+          # --break-system-packages: throwaway job container, PEP 668 guard not useful here
+          python3 -m pip install --quiet --break-system-packages --ignore-installed "semgrep==${SEMGREP_VERSION}"
+          semgrep scan --config auto --severity ERROR --error

@@ -1,0 +1,48 @@
+# E2E-only topology: throwaway Postgres + the portal image under test + the
+# mock UniFi controller, on one bridge network with NO published ports.
+# Never used in production. Run via test/e2e/run.sh (CI and local alike).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e
+      POSTGRES_DB: portal
+    tmpfs:
+      - /var/lib/postgresql/data # throwaway and fast; every run starts clean
+    healthcheck:
+      # -d portal: without it pg_isready probes a database named after the
+      # user, and every 2s probe logs a FATAL that drowns the real output.
+      test: ["CMD-SHELL", "pg_isready -U e2e -d portal"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mock-unifi:
+    build: ./test/mock-unifi
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9080/__health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  portal:
+    image: ${E2E_IMAGE:?set E2E_IMAGE to the portal image under test}
+    environment:
+      DATABASE_URL: "postgresql://e2e:e2e@db:5432/portal"
+      ADMIN_SECRET: "e2e-only-secret-0123456789"
+      # First-boot setup login; must match ADMIN_BOOTSTRAP_PASSWORD in
+      # test/e2e/helpers.ts.
+      ADMIN_PASSWORD: "e2e-bootstrap-pw"
+      # Deliberately NO COOKIE_SECURE: it would be seeded into the DB once
+      # (src/lib/seedSessionSecurityEnv.ts) and break cookies over plain http.
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # 127.0.0.1, not localhost — the standalone server binds IPv4 only.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 60s # covers `prisma migrate deploy` on boot

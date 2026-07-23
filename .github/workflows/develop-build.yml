@@ -1,0 +1,115 @@
+name: Develop build
+
+# The develop branch is the integration line. Since every change now enters
+# develop through a gated PR (CI + Security required checks), this build is
+# pure delivery: PATCH-ONLY version bump (dev-vX.Y.Z tag — never a plain v*
+# tag, which would mask commits from semantic-release on promotion) and the
+# :develop image.
+
+on:
+  push:
+    branches:
+      - develop
+
+concurrency:
+  # Rapid pushes coalesce; only the newest state matters on develop.
+  group: develop-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # tag push below
+      packages: write # ghcr push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Patch version bump + tag
+        # Patch-only, always: highest version across BOTH tag families
+        # (main's v* releases and develop's dev-v* builds) + 0.0.1. The tag
+        # is dev-v<n> — deliberately NOT matching semantic-release's
+        # tagFormat (v<n>), so develop tags never mask the feat/fix commits
+        # from the promotion release on main (a plain v-tag here would ride
+        # into main with the merge and suppress the real minor bump). The
+        # bump lands in the image via an uncommitted package.json edit.
+        run: |
+          last="$(git tag -l 'v*' 'dev-v*' | sed 's/^dev-//' | sort -V | tail -1)"
+          last="${last:-v0.0.0}"
+          base="${last#v}"
+          next="${base%.*}.$(( ${base##*.} + 1 ))"
+          echo "develop build version: $next (from $last)"
+          node -e "const f='./package.json',p=require(f);p.version='$next';require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+          git tag "dev-v$next"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Blake-DK/unifi-captiveportal.git" "dev-v$next"
+          echo "DEV_VERSION=$next" >> "$GITHUB_ENV"
+
+      - name: Log in to container registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image (:develop + :sha)
+        # `docker buildx build --push` (BuildKit's own registry pusher), not
+        # classic `docker build` + `docker push`: the classic push path hit
+        # a reproducible GHCR "unknown blob" error on this repo's first
+        # pushes — a cross-repo blob-mount bug for a shared base-image layer
+        # against a brand-new package. buildx's pusher doesn't take that
+        # code path. Never :latest — that tag belongs to main's release
+        # pipeline.
+        env:
+          # Read-only repo token, baked encrypted into the image (BuildKit
+          # secret — see the Dockerfile). Absent secret = feature skipped.
+          UPDATE_CHECK_TOKEN: ${{ secrets.UPDATE_CHECK_TOKEN }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          build_time="$(git log -1 --format=%cI "$sha")"
+          for attempt in 1 2 3; do
+            echo "==> Build+push attempt $attempt/3 (sha $sha, v$DEV_VERSION)"
+            if docker buildx build \
+                --build-arg GIT_SHA="$sha" \
+                --build-arg BUILD_TIME="$build_time" \
+                --build-arg CHANNEL=develop \
+                --secret id=update_check_token,env=UPDATE_CHECK_TOKEN \
+                --tag "ghcr.io/blake-dk/unifi-captiveportal:develop" \
+                --tag "ghcr.io/blake-dk/unifi-captiveportal:$sha" \
+                --push .; then
+              break
+            fi
+            echo "==> Attempt $attempt failed"
+            [ "$attempt" = 3 ] && { echo "all attempts failed" >&2; exit 1; }
+            sleep 30
+          done
+
+      - name: Runner disk cleanup
+        # The runners share this host's Docker daemon, and every build leaves
+        # debris behind: the pushed tags stay local (the registry already has
+        # them — the per-:sha tags were ~1.4GB per merge), superseded images
+        # go dangling, and the BuildKit cache grows without bound (it reached
+        # 74GB once). Local repo tags are safe to drop — rmi refuses while a
+        # running container uses one, and the BuildKit layer cache survives
+        # rmi, so the next build stays warm. The cache is capped rather than
+        # emptied for the same reason. Keep this step body identical across
+        # the three build workflows.
+        if: always()
+        run: |
+          docker images --format '{{.Repository}}:{{.Tag}}' \
+            | grep "^ghcr.io/blake-dk/unifi-captiveportal:" \
+            | xargs -r docker rmi || true
+          docker image prune -f
+          docker builder prune -f --keep-storage 20GB
