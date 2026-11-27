@@ -44,7 +44,7 @@
     "ssh2": "^1.17.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
-    "undici": "^8.5.0",
+    "undici": "^8.13.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
